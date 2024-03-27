@@ -35,7 +35,6 @@ public:
   T *end() { return data_ + size_; }
 
   T *resize(std::size_t cnt) {
-    // assert(cnt >= size_);
     if (cnt == size_)
       return data_;
 
@@ -44,12 +43,10 @@ public:
       if (cnt == 0) {
         sycl::free(data_, sycl_queue());
         data_ = nullptr;
-        size_ = 0;
-        return nullptr;
       } else {
         T *newdata = sycl::malloc<T>(cnt, sycl_queue(), sycl_mem_kind());
-        assert(cnt == 0 || newdata != nullptr);
-        sycl_queue().copy<T>(data_, newdata, size_ < cnt ? size_ : cnt);
+        assert(newdata != nullptr);
+        sycl_queue().copy<T>(data_, newdata, (size_ < cnt) ? size_ : cnt);
         sycl::free(data_, sycl_queue());
         data_ = newdata;
       }
@@ -60,8 +57,6 @@ public:
       if (cnt == 0) {
         free(data_);
         data_ = nullptr;
-        size_ = 0;
-        return nullptr;
       } else {
         T *newdata = static_cast<T *>(malloc(cnt * sizeof(T)));
         memcpy(newdata, data_, size_ * sizeof(T));
@@ -181,8 +176,6 @@ void _find_split_idx(Compare &&comp, auto &ls, auto &vec_v, auto &vec_i,
     }
     vec_s.back() = rng::size(ls) - vec_i.back();
   }
-  // fmt::print("{}: vec_v {} vec_i {} vec_s {}\n", default_comm().rank(),
-  // vec_v, vec_i, vec_s);
 }
 
 /* elements of dist_sort */
@@ -271,6 +264,7 @@ void shift_data(const int64_t shift_left, const int64_t shift_right,
     std::size_t old_size = rng::size(vec_recvdata);
     vec_recvdata.resize(rng::size(vec_recvdata) + shift_right);
 
+    assert(rng::size(vec_right) <= rng::size(vec_recvdata) - old_size);
     if (mhp::use_sycl()) {
 #ifdef SYCL_LANGUAGE_VERSION
       sycl_queue().copy<valT>(rng::data(vec_right),
@@ -280,8 +274,8 @@ void shift_data(const int64_t shift_left, const int64_t shift_right,
       assert(false);
 #endif
     } else {
-      memcpy(rng::data(vec_recvdata) + old_size, rng::data(vec_right),
-             rng::size(vec_right) * sizeof(valT));
+      std::copy(rng::begin(vec_right), rng::end(vec_right),
+                rng::begin(vec_recvdata) + old_size);
     }
     vec_right.resize(0);
 
@@ -292,6 +286,8 @@ void shift_data(const int64_t shift_left, const int64_t shift_right,
   } else if (static_cast<int64_t>(rng::size(vec_recvdata)) < -shift_right) {
     // Too little data in buffer to shift right - first get from left, then
     // send right
+    // ** This will never happen, because values eq to split go right ??? VERIFY
+    // !!!
     assert(false);
     assert(shift_left > 0);
 
@@ -310,8 +306,8 @@ void shift_data(const int64_t shift_left, const int64_t shift_right,
       assert(false);
 #endif
     } else {
-      memcpy(rng::data(vec_left) + shift_left, rng::data(vec_recvdata),
-             rng::size(vec_recvdata));
+      std::copy(rng::begin(vec_recvdata), rng::end(vec_recvdata),
+                rng::begin(vec_left) + shift_left);
     }
     vec_recvdata.replace(vec_left);
     vec_left.resize(0);
@@ -357,29 +353,31 @@ void copy_results(auto &lsegment, const int64_t shift_left,
   const std::size_t size_d =
       rng::size(vec_recvdata) - (invalidate_left + invalidate_right);
 
-  // fmt::print("{}: copy_results, l {} r {} d {}\n", default_comm().rank(),
-  //            size_l, size_r, size_d);
-  // fmt::print("{}: copy_results, invalidate left {} right {}\n",
-  //            default_comm().rank(), invalidate_left, invalidate_right);
-
   if (mhp::use_sycl()) {
 #ifdef SYCL_LANGUAGE_VERSION
     sycl::event e_l, e_d, e_r;
 
     if (size_l > 0) {
+      assert(size_l <= rng::size(lsegment));
       e_l = sycl_queue().copy(rng::data(vec_left), rng::data(lsegment), size_l);
     }
     if (size_r > 0) {
+      assert(size_l + size_d + size_r <= rng::size(lsegment));
       e_r = sycl_queue().copy(rng::data(vec_right),
                               rng::data(lsegment) + size_l + size_d, size_r);
     }
-    e_d = sycl_queue().copy(rng::data(vec_recvdata) + invalidate_left,
-                            rng::data(lsegment) + size_l, size_d);
+    if (size_d > 0) {
+      assert(size_l + size_d <= rng::size(lsegment));
+      assert(invalidate_left + size_d <= rng::size(vec_recvdata));
+      e_d = sycl_queue().copy(rng::data(vec_recvdata) + invalidate_left,
+                              rng::data(lsegment) + size_l, size_d);
+    }
     if (size_l > 0)
       e_l.wait();
     if (size_r > 0)
       e_r.wait();
-    e_d.wait();
+    if (size_d > 0)
+      e_d.wait();
 
 #else
     assert(false);
@@ -387,20 +385,19 @@ void copy_results(auto &lsegment, const int64_t shift_left,
   } else {
     if (size_l > 0) {
       assert(size_l <= rng::size(lsegment));
-      std::memcpy(rng::data(lsegment), rng::data(vec_left),
-                  size_l * sizeof(valT));
+      std::copy(rng::begin(vec_left), rng::end(vec_left), rng::begin(lsegment));
     }
     if (size_r > 0) {
       assert(size_l + size_d + size_r <= rng::size(lsegment));
-      std::memcpy(rng::data(lsegment) + size_l + size_d, rng::data(vec_right),
-                  size_r * sizeof(valT));
+      std::copy(rng::begin(vec_right), rng::end(vec_right),
+                rng::begin(lsegment) + size_l + size_d);
     }
     if (size_d > 0) {
       assert(size_l + size_d <= rng::size(lsegment));
       assert(invalidate_left + size_d <= rng::size(vec_recvdata));
-      std::memcpy(rng::data(lsegment) + size_l,
-                  rng::data(vec_recvdata) + invalidate_left,
-                  size_d * sizeof(valT));
+      std::copy(rng::begin(vec_recvdata) + invalidate_left,
+                rng::begin(vec_recvdata) + invalidate_left + size_d,
+                rng::begin(lsegment) + size_l);
     }
   }
 }

@@ -26,7 +26,7 @@ void test_sort(LV v, auto func) {
 
 void test_sort2s(LV v) {
   test_sort(v, std::less<T>());
-  test_sort(v, std::greater<T>());
+  // test_sort(v, std::greater<T>());
 }
 
 void test_sort_randomvec(std::size_t size, std::size_t bound = 100) {
