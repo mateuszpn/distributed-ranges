@@ -284,35 +284,11 @@ void shift_data(const int64_t shift_left, const int64_t shift_right,
   } else if (static_cast<int64_t>(rng::size(vec_recvdata)) < -shift_right) {
     // Too little data in buffer to shift right - first get from left, then
     // send right
-    // ** This will never happen, because values eq to split go right ??? VERIFY
-    // !!!
+    // ** This will never happen, because values eq to split go right
+    DRLOG(
+        "Too little data in buffer to shift right - this should never happen");
     assert(false);
-    assert(shift_left > 0);
 
-    default_comm().irecv(rng::data(vec_left), rng::size(vec_left),
-                         _comm_rank - 1, &req_l);
-    MPI_Wait(&req_l, &stat_l);
-
-    vec_left.resize(shift_left + rng::size(vec_recvdata));
-
-    if (mhp::use_sycl()) {
-#ifdef SYCL_LANGUAGE_VERSION
-      sycl_queue().copy<valT>(rng::data(vec_recvdata),
-                              rng::data(vec_left) + shift_left,
-                              rng::size(vec_recvdata));
-#else
-      assert(false);
-#endif
-    } else {
-      std::copy(rng::begin(vec_recvdata), rng::end(vec_recvdata),
-                rng::begin(vec_left) + shift_left);
-    }
-    vec_recvdata.replace(vec_left);
-    vec_left.resize(0);
-
-    default_comm().isend(vec_recvdata.end() + shift_right, -shift_right,
-                         _comm_rank + 1, &req_r);
-    MPI_Wait(&req_r, &stat_r);
   } else {
     // enough data in recv buffer
     if (shift_left < 0) {
