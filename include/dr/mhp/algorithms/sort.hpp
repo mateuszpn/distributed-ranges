@@ -46,7 +46,9 @@ public:
       } else {
         T *newdata = sycl::malloc<T>(cnt, sycl_queue(), sycl_mem_kind());
         assert(newdata != nullptr);
-        sycl_queue().copy<T>(data_, newdata, (size_ < cnt) ? size_ : cnt);
+        sycl_queue()
+            .copy<T>(data_, newdata, (size_ < cnt) ? size_ : cnt)
+            .wait();
         sycl::free(data_, sycl_queue());
         data_ = newdata;
       }
@@ -142,47 +144,10 @@ template <typename R, typename Compare> void local_sort(R &r, Compare &&comp) {
   }
 }
 
-template <typename Compare>
-void _find_split_idx(Compare &&comp, auto &ls, auto &vec_v, auto &vec_i,
-                     auto &vec_s) {
-  if (mhp::use_sycl()) {
-#ifdef SYCL_LANGUAGE_VERSION
-    auto &&local_policy = dpl_policy();
-
-    auto lsb = dr::__detail::direct_iterator(rng::begin(ls));
-    auto lse = dr::__detail::direct_iterator(rng::end(ls));
-
-    oneapi::dpl::lower_bound(local_policy, lsb, lse, vec_v.begin(), vec_v.end(),
-                             vec_i.begin() + 1, comp);
-
-    for (std::size_t _i = 1; _i < vec_i.size(); _i++) {
-      vec_s[_i - 1] = vec_i[_i] - vec_i[_i - 1];
-    }
-    vec_s.back() = rng::size(ls) - vec_i.back();
-
-#else
-    assert(false);
-#endif
-  } else {
-    auto first = ls.begin();
-    for (std::size_t i = 1; i <= rng::size(vec_v); i++) {
-      auto idx = vec_v[i - 1];
-      auto lower = std::lower_bound(ls.begin(), ls.end(), idx, comp);
-      auto idx_lower = rng::distance(ls.begin(), lower);
-      auto chunk_size = rng::distance(first, lower);
-      vec_i[i] = idx_lower;
-      vec_s[i - 1] = chunk_size;
-      first = lower;
-    }
-    vec_s.back() = rng::size(ls) - vec_i.back();
-  }
-}
-
 /* elements of dist_sort */
 template <typename valT, typename Compare, typename Seg>
-void splitters(Seg &lsegment, Compare &&comp,
-               std::vector<std::size_t> &vec_split_i,
-               std::vector<std::size_t> &vec_split_s) {
+void splitters(Seg &lsegment, Compare &&comp, auto &vec_split_i,
+               auto &vec_split_s) {
   const std::size_t _comm_size = default_comm().size(); // dr-style ignore
 
   assert(rng::size(vec_split_i) == _comm_size);
@@ -233,7 +198,39 @@ void splitters(Seg &lsegment, Compare &&comp,
     vec_split_v[_i] = vec_gmedians[global_median_idx];
   }
 
-  _find_split_idx(comp, lsegment, vec_split_v, vec_split_i, vec_split_s);
+  if (mhp::use_sycl()) {
+#ifdef SYCL_LANGUAGE_VERSION
+    auto &&local_policy = dpl_policy();
+    sycl::queue q = sycl_queue();
+
+    auto lsb = dr::__detail::direct_iterator(rng::begin(lsegment));
+    auto lse = dr::__detail::direct_iterator(rng::end(lsegment));
+
+    oneapi::dpl::lower_bound(local_policy, lsb, lse, vec_split_v.begin(),
+                             vec_split_v.end(), vec_split_i.begin() + 1, comp);
+
+    for (std::size_t _i = 1; _i < vec_split_i.size(); _i++) {
+      vec_split_s[_i - 1] = vec_split_i[_i] - vec_split_i[_i - 1];
+    }
+    vec_split_s.back() = rng::size(lsegment) - vec_split_i.back();
+
+#else
+    assert(false);
+#endif
+  } else {
+    auto first = lsegment.begin();
+    for (std::size_t i = 1; i <= rng::size(vec_split_v); i++) {
+      auto idx = vec_split_v[i - 1];
+      auto lower =
+          std::lower_bound(lsegment.begin(), lsegment.end(), idx, comp);
+      auto idx_lower = rng::distance(lsegment.begin(), lower);
+      auto chunk_size = rng::distance(first, lower);
+      vec_split_i[i] = idx_lower;
+      vec_split_s[i - 1] = chunk_size;
+      first = lower;
+    }
+    vec_split_s.back() = rng::size(lsegment) - vec_split_i.back();
+  }
 }
 
 template <typename valT>
@@ -267,9 +264,10 @@ void shift_data(const int64_t shift_left, const int64_t shift_right,
     assert(rng::size(vec_right) <= rng::size(vec_recvdata) - old_size);
     if (mhp::use_sycl()) {
 #ifdef SYCL_LANGUAGE_VERSION
-      sycl_queue().copy<valT>(rng::data(vec_right),
-                              rng::data(vec_recvdata) + old_size,
-                              rng::size(vec_right));
+      sycl_queue()
+          .copy<valT>(rng::data(vec_right), rng::data(vec_recvdata) + old_size,
+                      rng::size(vec_right))
+          .wait();
 #else
       assert(false);
 #endif
@@ -433,7 +431,7 @@ void dist_sort(R &r, Compare &&comp) {
 
   /* send and receive data belonging to each node, then redistribute
    * data to achieve size of data equal to size of local segment */
-  /* async all_gather causes problems on some systems */
+  /* async i_all_gather causes problems on some systems */
   // MPI_Request req_recvelems;
   default_comm().all_gather(_recv_elems, vec_recv_elems);
 
